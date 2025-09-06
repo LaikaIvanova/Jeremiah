@@ -1,0 +1,14 @@
+# Sensitive data
+tokens.txt
+data/
+discloud.config
+
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+
+# System files
+.DS_Store
+Thumbs.db

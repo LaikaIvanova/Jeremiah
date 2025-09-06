@@ -1,0 +1,20 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Launch Jeremiah Bot",
+            "program": "${workspaceFolder}/bot.js",
+            "console": "integratedTerminal",
+            "restart": true,
+            "runtimeArgs": [],
+            "env": {
+                "NODE_ENV": "development"
+            },
+            "skipFiles": [
+                "<node_internals>/**"
+            ]
+        }
+    ]
+}
