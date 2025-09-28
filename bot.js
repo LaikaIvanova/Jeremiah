@@ -274,6 +274,14 @@ function calculateVoiceXPGain(lastVoiceTime, voiceMinuteCount, user, guildId) {
     return Math.max(0.0001, xp);
 }
 
+function getCurrentGermanDate() {
+    // Get current date in German timezone (Europe/Berlin)
+    const now = new Date();
+    const germanTime = new Date(now.toLocaleString("en-US", {timeZone: "Europe/Berlin"}));
+    // Return date string in YYYY-MM-DD format
+    return germanTime.toISOString().split('T')[0];
+}
+
 function addXP(guildId, userId, username, wordCount, user) {
     const serverData = getServerLevels(guildId);
     const now = Date.now();
@@ -284,7 +292,8 @@ function addXP(guildId, userId, username, wordCount, user) {
             username: username,
             xp: 0,
             level: 1,
-            messageCount: 0
+            messageCount: 0,
+            lastDailyBonus: null
         };
     }
     
@@ -317,7 +326,15 @@ function addXP(guildId, userId, username, wordCount, user) {
     }
     
     // Calculate XP gain (pass Discord user object and guildId for server tag detection)
-    const xpGain = calculateXPGain(wordCount, lastMessage.timestamp, messageCount, user, guildId);
+    let xpGain = calculateXPGain(wordCount, lastMessage.timestamp, messageCount, user, guildId);
+    
+    // Check for daily bonus (10 XP for first message of the day)
+    const currentDate = getCurrentGermanDate();
+    if (userData.lastDailyBonus !== currentDate) {
+        // User hasn't received daily bonus today, apply it
+        xpGain += 10;
+        userData.lastDailyBonus = currentDate;
+    }
     
     // Update user data
     const oldLevel = userData.level;
