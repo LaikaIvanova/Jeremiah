@@ -207,8 +207,8 @@ function getLevelFromXP(xp) {
 }
 
 function calculateXPGain(wordCount, lastMessageTime, messageCount, user, guildId) {
-    // Base XP is word count
-    let xp = wordCount;
+    // Base XP is 0.1 per word
+    let xp = wordCount * 0.1;
     
     // Apply diminishing returns based on message frequency
     const now = Date.now();
@@ -630,43 +630,57 @@ client.once('ready', async () => {
     startLevelboardUpdates();
 });
 
-// Function to assign "Survivor" role to users level 10 or above
-async function assignSurvivorRoles(guildId, serverData) {
+// Function to assign level roles to users based on their level
+async function assignLevelRoles(guildId, serverData) {
     if (!serverData.users) return;
     
     try {
         const guild = await client.guilds.fetch(guildId);
         
-        // Find or create the "Survivor" role
-        let survivorRole = guild.roles.cache.find(role => role.name === 'Survivor');
-        if (!survivorRole) {
-            survivorRole = await guild.roles.create({
-                name: 'Survivor',
-                color: '#00ff00', // Green color
-                reason: 'Auto-created role for level 10+ users'
-            });
-            console.log(`Created "Survivor" role in guild ${guild.name}`);
-        }
-        
-        // Check all users with level data
+        // Process each user with level data
         for (const [userId, userData] of Object.entries(serverData.users)) {
-            if (userData.level >= 10) {
+            if (userData.level >= 1) {
                 try {
                     const member = await guild.members.fetch(userId);
+                    const targetLevel = userData.level;
+                    const targetRoleName = `Level ${targetLevel}`;
                     
-                    // Add role if they don't already have it
-                    if (!member.roles.cache.has(survivorRole.id)) {
-                        await member.roles.add(survivorRole);
-                        console.log(`Assigned "Survivor" role to ${userData.username} (Level ${userData.level})`);
+                    // Find or create the level role
+                    let levelRole = guild.roles.cache.find(role => role.name === targetRoleName);
+                    if (!levelRole) {
+                        levelRole = await guild.roles.create({
+                            name: targetRoleName,
+                            color: 'Random', // Random color for each level
+                            reason: `Auto-created level role for level ${targetLevel} users`
+                        });
+                        console.log(`Created "${targetRoleName}" role in guild ${guild.name}`);
+                    }
+                    
+                    // Remove any old level roles from this user
+                    const oldLevelRoles = member.roles.cache.filter(role => 
+                        role.name.startsWith('Level ') && role.name !== targetRoleName
+                    );
+                    
+                    for (const oldRole of oldLevelRoles.values()) {
+                        if (member.roles.cache.has(oldRole.id)) {
+                            await member.roles.remove(oldRole);
+                            console.log(`Removed old role "${oldRole.name}" from ${userData.username}`);
+                        }
+                    }
+                    
+                    // Add the correct level role if they don't already have it
+                    if (!member.roles.cache.has(levelRole.id)) {
+                        await member.roles.add(levelRole);
+                        console.log(`Assigned "${targetRoleName}" role to ${userData.username} (Level ${userData.level})`);
                     }
                 } catch (memberError) {
                     // User might have left the server
-                    console.log(`Could not fetch member ${userId} for Survivor role assignment`);
+                    console.log(`Could not fetch member ${userId} for level role assignment`);
                 }
             }
         }
     } catch (error) {
-        console.log(`Error managing Survivor roles for guild ${guildId}:`, error.message);
+        console.log(`Error managing level roles for guild ${guildId}:`, error.message);
     }
 }
 
@@ -704,11 +718,11 @@ function startLevelboardUpdates() {
                     }
                 }
                 
-                // Check and assign "Survivor" role to level 10+ users
+                // Check and assign level roles to users
                 try {
-                    await assignSurvivorRoles(guildId, serverData);
+                    await assignLevelRoles(guildId, serverData);
                 } catch (error) {
-                    console.log(`Could not assign Survivor roles for guild ${guildId}:`, error.message);
+                    console.log(`Could not assign level roles for guild ${guildId}:`, error.message);
                 }
             }
         } catch (error) {
