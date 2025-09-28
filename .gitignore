@@ -2,6 +2,7 @@
 tokens.txt
 data/
 discloud.config
+bot.github.js
 
 # Dependencies
 node_modules/
