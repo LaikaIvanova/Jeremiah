@@ -1067,7 +1067,7 @@ client.on('interactionCreate', async interaction => {
                 
                 // Get the actual XP gain for 1 word to determine the current modifier
                 const actualXPGain = calculateXPGain(1, lastMessage.timestamp, messageCount, null, null);
-                chatModifier = actualXPGain; // This already includes all penalties but not server tag
+                chatModifier = actualXPGain / 0.1; // Normalize to baseline (0.1 XP per word is now 1.0x)
             }
             
             // Voice modifier calculation - use actual calculateVoiceXPGain function
