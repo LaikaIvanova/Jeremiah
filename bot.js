@@ -24,6 +24,7 @@ const processedInteractions = new Set();
 // Scoreboard data file
 const SCOREBOARD_FILE = path.join(__dirname, 'data', 'scoreboard.json');
 const LEVELS_FILE = path.join(__dirname, 'data', 'levels.json');
+const RECOVERY_CONFIG_FILE = path.join(__dirname, 'data', 'recovery_config.txt');
 
 // Create data directory if it doesn't exist
 if (!fs.existsSync(path.dirname(SCOREBOARD_FILE))) {
@@ -110,6 +111,34 @@ function saveLevels(data) {
     fs.writeFileSync(LEVELS_FILE, JSON.stringify(data, null, 2));
 }
 
+function loadRecoveryConfig() {
+    if (!fs.existsSync(RECOVERY_CONFIG_FILE)) {
+        // Default values
+        return {
+            channelId: "1419282967733342279",
+            messageId: "1421725310243704915"
+        };
+    }
+    try {
+        const content = fs.readFileSync(RECOVERY_CONFIG_FILE, 'utf8').trim().split('\n');
+        return {
+            channelId: content[0] || "1419282967733342279",
+            messageId: content[1] || "1421725310243704915"
+        };
+    } catch (error) {
+        console.error('Error reading recovery config:', error);
+        return {
+            channelId: "1419282967733342279",
+            messageId: "1421725310243704915"
+        };
+    }
+}
+
+function saveRecoveryConfig(channelId, messageId) {
+    const content = `${channelId}\n${messageId}`;
+    fs.writeFileSync(RECOVERY_CONFIG_FILE, content, 'utf8');
+}
+
 function getServerLevels(guildId) {
     const allData = loadLevels();
     if (!allData[guildId]) {
@@ -162,16 +191,17 @@ async function getLevelboardText(serverData, client) {
     const maxLevel = Math.max(...sortedUsers.map(([,userData]) => userData.level));
     const levelWidth = maxLevel.toString().length;
     
-    // Calculate maximum XP width (including commas)
-    const maxXP = Math.max(...sortedUsers.map(([,userData]) => Math.floor(userData.xp)));
-    const xpWidth = maxXP.toLocaleString().length;
+    // Calculate maximum XP width (including decimals and commas)
+    const maxXP = Math.max(...sortedUsers.map(([,userData]) => userData.xp));
+    const maxXPFormatted = maxXP.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const xpWidth = maxXPFormatted.length;
     
     let scoreboard = '```\nLEVEL SCOREBOARD:\n';
     
     // User entries - fetch current usernames dynamically
     for (const [userId, userData] of sortedUsers) {
         const level = userData.level.toString().padStart(levelWidth, ' ');
-        const xp = Math.floor(userData.xp).toLocaleString().padStart(xpWidth, ' '); // Right-align XP
+        const xp = userData.xp.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).padStart(xpWidth, ' '); // Right-align XP with 2 decimals
         
         // Fetch current username from Discord
         let username = userData.username; // fallback to stored username
@@ -272,6 +302,107 @@ function calculateVoiceXPGain(lastVoiceTime, voiceMinuteCount, user, guildId) {
     
     // Ensure minimum XP is 0.0001
     return Math.max(0.0001, xp);
+}
+
+async function recoverDataFromLevelboard(client) {
+    const recoveryConfig = loadRecoveryConfig();
+    const RECOVERY_CHANNEL_ID = recoveryConfig.channelId;
+    const RECOVERY_MESSAGE_ID = recoveryConfig.messageId;
+    const GUILD_ID = "1416823209113686089"; // Your server ID
+    
+    console.log('🔄 Attempting data recovery from levelboard...');
+    
+    try {
+        // Get the channel and message
+        const channel = await client.channels.fetch(RECOVERY_CHANNEL_ID);
+        const message = await channel.messages.fetch(RECOVERY_MESSAGE_ID);
+        
+        if (!message || !message.content) {
+            console.log('❌ Could not find levelboard message for recovery');
+            return false;
+        }
+        
+        console.log('📋 Found levelboard message, parsing data...');
+        
+        // Parse the levelboard content
+        const content = message.content;
+        const lines = content.split('\n');
+        
+        const recoveredUsers = {};
+        let recoveredCount = 0;
+        
+        for (const line of lines) {
+            // Match format: "level | xp XP | username"
+            const match = line.match(/^\s*(\d+)\s*\|\s*([0-9,]+)\s*XP\s*\|\s*(.+)$/);
+            if (match) {
+                const level = parseInt(match[1]);
+                const xp = parseInt(match[2].replace(/,/g, '')); // Remove commas
+                const username = match[3].trim();
+                
+                // Try to find the user ID by username
+                const guild = await client.guilds.fetch(GUILD_ID);
+                const members = await guild.members.fetch();
+                const member = members.find(m => m.user.username === username);
+                
+                if (member) {
+                    recoveredUsers[member.user.id] = {
+                        username: username,
+                        xp: xp,
+                        level: level,
+                        messageCount: 0,
+                        lastDailyBonus: null
+                    };
+                    recoveredCount++;
+                    console.log(`✅ Recovered: ${username} (Level ${level}, ${xp} XP)`);
+                } else {
+                    console.log(`⚠️  Could not find user: ${username}`);
+                }
+            }
+        }
+        
+        if (recoveredCount > 0) {
+            // Create the server data structure
+            const serverData = {
+                users: recoveredUsers,
+                lastMessages: {},
+                levelboardChannelId: RECOVERY_CHANNEL_ID,
+                levelboardMessageId: RECOVERY_MESSAGE_ID
+            };
+            
+            // Save the recovered data
+            saveServerLevels(GUILD_ID, serverData);
+            console.log(`🎉 Successfully recovered ${recoveredCount} users' data!`);
+            return true;
+        } else {
+            console.log('❌ No user data could be recovered');
+            return false;
+        }
+        
+    } catch (error) {
+        console.error('❌ Error during data recovery:', error);
+        return false;
+    }
+}
+
+async function checkAndRecoverData(client) {
+    const GUILD_ID = "1416823209113686089";
+    
+    // Check if we have existing data
+    const existingData = getServerLevels(GUILD_ID);
+    const hasUsers = existingData.users && Object.keys(existingData.users).length > 0;
+    
+    if (!hasUsers) {
+        console.log('🔍 No user data found, attempting recovery from levelboard...');
+        const recovered = await recoverDataFromLevelboard(client);
+        
+        if (recovered) {
+            console.log('✅ Data recovery completed successfully!');
+        } else {
+            console.log('⚠️  Data recovery failed, starting with fresh data');
+        }
+    } else {
+        console.log(`📊 Found existing data for ${Object.keys(existingData.users).length} users`);
+    }
 }
 
 function getCurrentGermanDate() {
@@ -588,6 +719,21 @@ const voiceCooldownCommand = new SlashCommandBuilder()
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 commands.push(voiceCooldownCommand);
 
+// Admin-only command to update recovery config
+const recoveryConfigCommand = new SlashCommandBuilder()
+    .setName('recoveryconfig')
+    .setDescription('Update the levelboard message IDs for data recovery')
+    .addStringOption(option =>
+        option.setName('channel_id')
+            .setDescription('Channel ID containing the levelboard')
+            .setRequired(true))
+    .addStringOption(option =>
+        option.setName('message_id')
+            .setDescription('Message ID of the levelboard')
+            .setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
+commands.push(recoveryConfigCommand);
+
 // Register commands
 async function registerCommands() {
     try {
@@ -628,6 +774,9 @@ async function registerCommands() {
 // Bot ready event
 client.once('ready', async () => {
     console.log(`Ready! Logged in as ${client.user.tag}`);
+    
+    // Check and recover data if needed
+    await checkAndRecoverData(client);
     
     // Set bot status
     client.user.setPresence({
@@ -713,6 +862,13 @@ function startLevelboardUpdates() {
             
             for (const [guildId, serverData] of Object.entries(allLevelData)) {
                 const operationKey = `levelboard_${guildId}`;
+                
+                // Skip if bot is not in this guild
+                const guild = client.guilds.cache.get(guildId);
+                if (!guild) {
+                    console.log(`[DEBUG] Skipping guild ${guildId} - bot is not a member`);
+                    continue;
+                }
                 
                 // Skip if manual operation is in progress
                 if (levelboardOperations.has(operationKey)) {
@@ -1276,6 +1432,45 @@ client.on('interactionCreate', async interaction => {
             minutes = Math.max(0, lastVoice.voiceMinuteCount - recoveryAmount); // Ignore 35 min cap
         }
         await interaction.reply({ content: `${targetUser.username} currently has ${minutes} minute(s) of voice XP penalty remaining (actual stored value).`, ephemeral: true });
+        return;
+    }
+    else if (commandName === 'recoveryconfig') {
+        // Check if user is admin
+        if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            await interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
+            return;
+        }
+        
+        const channelId = interaction.options.getString('channel_id');
+        const messageId = interaction.options.getString('message_id');
+        
+        // Validate the IDs (basic validation)
+        if (!/^\d{17,19}$/.test(channelId) || !/^\d{17,19}$/.test(messageId)) {
+            await interaction.reply({ content: 'Invalid channel or message ID format. IDs should be 17-19 digit numbers.', ephemeral: true });
+            return;
+        }
+        
+        try {
+            // Test if we can fetch the message to validate the IDs
+            const channel = await client.channels.fetch(channelId);
+            const message = await channel.messages.fetch(messageId);
+            
+            // Save the new configuration
+            saveRecoveryConfig(channelId, messageId);
+            
+            await interaction.reply({ 
+                content: `✅ Recovery configuration updated successfully!\n` +
+                        `Channel ID: ${channelId}\n` +
+                        `Message ID: ${messageId}\n` +
+                        `Configuration saved to recovery_config.txt`,
+                ephemeral: true 
+            });
+        } catch (error) {
+            await interaction.reply({ 
+                content: `❌ Error: Could not fetch the message with the provided IDs. Please verify the channel and message IDs are correct.\n\nError: ${error.message}`,
+                ephemeral: true 
+            });
+        }
         return;
     }
 });
