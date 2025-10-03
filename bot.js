@@ -101,14 +101,39 @@ const ARK_XP_TABLE = [
 
 // Leveling functions
 function loadLevels() {
-    if (!fs.existsSync(LEVELS_FILE)) {
+    try {
+        if (!fs.existsSync(LEVELS_FILE)) {
+            return {};
+        }
+        const data = fs.readFileSync(LEVELS_FILE, 'utf8');
+        return JSON.parse(data);
+    } catch (error) {
+        console.error('Error loading levels file:', error);
+        console.log('Creating backup and starting with empty levels data');
+        
+        // Try to create a backup if file exists but is corrupted
+        if (fs.existsSync(LEVELS_FILE)) {
+            try {
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                const backupPath = `${LEVELS_FILE}.backup-${timestamp}`;
+                fs.copyFileSync(LEVELS_FILE, backupPath);
+                console.log(`Corrupted levels file backed up to: ${backupPath}`);
+            } catch (backupError) {
+                console.error('Could not create backup:', backupError);
+            }
+        }
+        
         return {};
     }
-    return JSON.parse(fs.readFileSync(LEVELS_FILE, 'utf8'));
 }
 
 function saveLevels(data) {
-    fs.writeFileSync(LEVELS_FILE, JSON.stringify(data, null, 2));
+    try {
+        fs.writeFileSync(LEVELS_FILE, JSON.stringify(data, null, 2));
+    } catch (error) {
+        console.error('Error writing levels file:', error);
+        throw error;
+    }
 }
 
 function loadRecoveryConfig() {
@@ -169,9 +194,14 @@ function getServerTagMultiplier(user, guildId) {
 }
 
 function saveServerLevels(guildId, serverData) {
-    const allData = loadLevels();
-    allData[guildId] = serverData;
-    saveLevels(allData);
+    try {
+        const allData = loadLevels();
+        allData[guildId] = serverData;
+        saveLevels(allData);
+    } catch (error) {
+        console.error(`Error saving server levels for guild ${guildId}:`, error);
+        throw error; // Re-throw so calling function knows save failed
+    }
 }
 
 async function getLevelboardText(serverData, client) {
@@ -406,11 +436,18 @@ async function checkAndRecoverData(client) {
 }
 
 function getCurrentGermanDate() {
-    // Get current date in German timezone (Europe/Berlin)
-    const now = new Date();
-    const germanTime = new Date(now.toLocaleString("en-US", {timeZone: "Europe/Berlin"}));
-    // Return date string in YYYY-MM-DD format
-    return germanTime.toISOString().split('T')[0];
+    try {
+        // Get current date in German timezone (Europe/Berlin)
+        const now = new Date();
+        const germanTime = new Date(now.toLocaleString("en-US", {timeZone: "Europe/Berlin"}));
+        // Return date string in YYYY-MM-DD format
+        return germanTime.toISOString().split('T')[0];
+    } catch (error) {
+        console.error('Error getting German date:', error);
+        // Fallback to UTC date if timezone conversion fails
+        const now = new Date();
+        return now.toISOString().split('T')[0];
+    }
 }
 
 function addXP(guildId, userId, username, wordCount, user) {
@@ -426,6 +463,11 @@ function addXP(guildId, userId, username, wordCount, user) {
             messageCount: 0,
             lastDailyBonus: null
         };
+    }
+    
+    // Ensure lastDailyBonus exists for existing users (migration fix)
+    if (!serverData.users[userId].hasOwnProperty('lastDailyBonus')) {
+        serverData.users[userId].lastDailyBonus = null;
     }
     
     // Initialize last message tracking if doesn't exist
@@ -478,8 +520,14 @@ function addXP(guildId, userId, username, wordCount, user) {
     lastMessage.timestamp = now;
     lastMessage.messageCount = messageCount;
     
-    // Save data
-    saveServerLevels(guildId, serverData);
+    // Save data with error handling
+    try {
+        saveServerLevels(guildId, serverData);
+    } catch (saveError) {
+        console.error(`Failed to save XP data for user ${username} (${userId}):`, saveError);
+        // Don't throw here - we still want to return the XP info even if save failed
+        // The user did gain XP in memory, just wasn't persisted
+    }
     
     // Return level up info if applicable
     const leveledUp = userData.level > oldLevel;
@@ -502,8 +550,14 @@ function addVoiceXP(guildId, userId, username, user) {
             username: username,
             xp: 0,
             level: 1,
-            messageCount: 0
+            messageCount: 0,
+            lastDailyBonus: null
         };
+    }
+    
+    // Ensure lastDailyBonus exists for existing users (migration fix)
+    if (!serverData.users[userId].hasOwnProperty('lastDailyBonus')) {
+        serverData.users[userId].lastDailyBonus = null;
     }
     
     // Initialize voice tracking if doesn't exist
@@ -547,8 +601,13 @@ function addVoiceXP(guildId, userId, username, user) {
     lastVoice.timestamp = now;
     lastVoice.voiceMinuteCount = voiceMinuteCount;
     
-    // Save data
-    saveServerLevels(guildId, serverData);
+    // Save data with error handling
+    try {
+        saveServerLevels(guildId, serverData);
+    } catch (saveError) {
+        console.error(`Failed to save voice XP data for user ${username} (${userId}):`, saveError);
+        // Don't throw here - we still want to return the XP info even if save failed
+    }
     
     // Return level up info if applicable
     const leveledUp = userData.level > oldLevel;
@@ -974,25 +1033,35 @@ async function scanExistingScoreboards() {
 
 // Handle messages for XP system
 client.on('messageCreate', async message => {
-    // Ignore bot messages and DMs
-    if (message.author.bot || !message.guild) return;
-    
-    // Count words in the message
-    const words = message.content.trim().split(/\s+/).filter(word => word.length > 0);
-    const wordCount = words.length;
-    
-    if (wordCount === 0) return; // No words, no XP
-    
-    // Add XP to user
-    const result = addXP(message.guild.id, message.author.id, message.author.username, wordCount, message.author);
-    
-    // Notify on level up (optional - you can remove this if you don't want notifications)
-    if (result.leveledUp) {
-        try {
-            await message.react('🎉');
-        } catch (error) {
-            console.log('Could not send level up notification:', error.message);
+    try {
+        // Ignore bot messages and DMs
+        if (message.author.bot || !message.guild) return;
+        
+        // Count words in the message
+        const words = message.content.trim().split(/\s+/).filter(word => word.length > 0);
+        const wordCount = words.length;
+        
+        if (wordCount === 0) return; // No words, no XP
+        
+        // Add XP to user
+        const result = addXP(message.guild.id, message.author.id, message.author.username, wordCount, message.author);
+        
+        // Notify on level up (optional - you can remove this if you don't want notifications)
+        if (result.leveledUp) {
+            try {
+                await message.react('🎉');
+            } catch (error) {
+                console.log('Could not send level up notification:', error.message);
+            }
         }
+    } catch (error) {
+        console.error('Error processing message for XP system:', error);
+        console.error('Message details:', {
+            guildId: message.guild?.id,
+            userId: message.author?.id,
+            username: message.author?.username,
+            content: message.content?.substring(0, 100) // First 100 chars for debugging
+        });
     }
 });
 
