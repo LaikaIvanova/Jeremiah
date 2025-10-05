@@ -10,8 +10,8 @@ try {
     TOKEN = tokens[0].trim();
     CLIENT_ID = tokens[1].trim();
 } catch (error) {
-    console.error('Error reading tokens.txt file:', error.message);
-    console.error('Make sure tokens.txt exists with your bot token on line 1 and client ID on line 2');
+    errorWithTimestamp('Error reading tokens.txt file: ' + error.message);
+    errorWithTimestamp('Make sure tokens.txt exists with your bot token on line 1 and client ID on line 2');
     process.exit(1);
 }
 
@@ -29,6 +29,25 @@ const RECOVERY_CONFIG_FILE = path.join(__dirname, 'data', 'recovery_config.txt')
 // Create data directory if it doesn't exist
 if (!fs.existsSync(path.dirname(SCOREBOARD_FILE))) {
     fs.mkdirSync(path.dirname(SCOREBOARD_FILE), { recursive: true });
+}
+
+// Helper function to get current German time timestamp for logging
+function getTimestamp() {
+    const now = new Date();
+    const germanTime = new Date(now.toLocaleString("en-US", {timeZone: "Europe/Berlin"}));
+    const hours = germanTime.getHours().toString().padStart(2, '0');
+    const minutes = germanTime.getMinutes().toString().padStart(2, '0');
+    return `[${hours}:${minutes}]`;
+}
+
+// Enhanced console.log with timestamp
+function logWithTimestamp(message) {
+    console.log(`${getTimestamp()} ${message}`);
+}
+
+// Enhanced console.error with timestamp
+function errorWithTimestamp(message) {
+    console.error(`${getTimestamp()} ${message}`);
 }
 
 // Scoreboard functions
@@ -79,7 +98,7 @@ function getRandomQuote(username) {
         const randomIndex = Math.floor(Math.random() * quotes.length);
         return quotes[randomIndex];
     } catch (error) {
-        console.error(`Error reading quotes for ${username}:`, error);
+        errorWithTimestamp(`Error reading quotes for ${username}: ` + error);
         return null;
     }
 }
@@ -108,8 +127,8 @@ function loadLevels() {
         const data = fs.readFileSync(LEVELS_FILE, 'utf8');
         return JSON.parse(data);
     } catch (error) {
-        console.error('Error loading levels file:', error);
-        console.log('Creating backup and starting with empty levels data');
+        errorWithTimestamp('Error loading levels file: ' + error);
+        logWithTimestamp('Creating backup and starting with empty levels data');
         
         // Try to create a backup if file exists but is corrupted
         if (fs.existsSync(LEVELS_FILE)) {
@@ -117,9 +136,9 @@ function loadLevels() {
                 const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
                 const backupPath = `${LEVELS_FILE}.backup-${timestamp}`;
                 fs.copyFileSync(LEVELS_FILE, backupPath);
-                console.log(`Corrupted levels file backed up to: ${backupPath}`);
+                logWithTimestamp(`Corrupted levels file backed up to: ${backupPath}`);
             } catch (backupError) {
-                console.error('Could not create backup:', backupError);
+                errorWithTimestamp('Could not create backup: ' + backupError);
             }
         }
         
@@ -131,7 +150,7 @@ function saveLevels(data) {
     try {
         fs.writeFileSync(LEVELS_FILE, JSON.stringify(data, null, 2));
     } catch (error) {
-        console.error('Error writing levels file:', error);
+        errorWithTimestamp('Error writing levels file: ' + error);
         throw error;
     }
 }
@@ -151,7 +170,7 @@ function loadRecoveryConfig() {
             messageId: content[1] || "1421725310243704915"
         };
     } catch (error) {
-        console.error('Error reading recovery config:', error);
+        errorWithTimestamp('Error reading recovery config: ' + error);
         return {
             channelId: "1419282967733342279",
             messageId: "1421725310243704915"
@@ -178,16 +197,56 @@ function getServerLevels(guildId) {
 }
 
 // Server Tags functions
-function hasServerTag(user, guildId) {
-    if (!user.primaryGuild) return false;
-    
-    return user.primaryGuild.identityEnabled && 
-           user.primaryGuild.identityGuildId === guildId;
+async function hasServerTag(user, guildId) {
+    try {
+        // Method 1: Try the user profile endpoint with proper authentication
+        const rest = new REST({ version: '10' }).setToken(TOKEN);
+        
+        // Try different possible endpoints for user profile/clan data
+        let userProfile;
+        
+        try {
+            // Primary method: User profile with guild context
+            userProfile = await rest.get(`/users/${user.id}/profile`, {
+                query: new URLSearchParams({ 
+                    guild_id: guildId,
+                    with_mutual_guilds: 'true',
+                    with_mutual_friends_count: 'false'
+                })
+            });
+        } catch (profileError) {
+            // Alternative method: Try guild member endpoint with additional data
+            try {
+                const member = await rest.get(`/guilds/${guildId}/members/${user.id}`);
+                
+                // Check if member data contains clan/tag information
+                if (member.user && member.user.clan) {
+                    userProfile = { user_profile: { clan: member.user.clan } };
+                }
+            } catch (memberError) {
+                return false;
+            }
+        }
+        
+        // Check if user has a clan tag (server tag) applied for this guild
+        if (userProfile && userProfile.user_profile && userProfile.user_profile.clan) {
+            const clan = userProfile.user_profile.clan;
+            
+            // Verify the clan tag is for this specific guild
+            const hasTag = clan.identity_guild_id === guildId && clan.identity_enabled === true;
+            return hasTag;
+        }
+        
+        return false;
+        
+    } catch (error) {
+        return false;
+    }
 }
 
-function getServerTagMultiplier(user, guildId) {
+async function getServerTagMultiplier(user, guildId) {
     // Give double XP for displaying server tag
-    if (hasServerTag(user, guildId)) {
+    if (await hasServerTag(user, guildId)) {
         return 2.0; // 100% bonus (double XP) for displaying server tag
     }
     return 1.0;
@@ -199,7 +258,7 @@ function saveServerLevels(guildId, serverData) {
         allData[guildId] = serverData;
         saveLevels(allData);
     } catch (error) {
-        console.error(`Error saving server levels for guild ${guildId}:`, error);
+        errorWithTimestamp(`Error saving server levels for guild ${guildId}: ` + error);
         throw error; // Re-throw so calling function knows save failed
     }
 }
@@ -240,7 +299,7 @@ async function getLevelboardText(serverData, client) {
             username = user.username;
         } catch (error) {
             // If user can't be fetched, use stored username as fallback
-            console.log(`Could not fetch user ${userId}, using stored username: ${username}`);
+            logWithTimestamp(`Could not fetch user ${userId}, using stored username: ${username}`);
         }
         
         scoreboard += `${level} | ${xp} XP | ${username}\n`;
@@ -297,11 +356,8 @@ function calculateXPGain(wordCount, lastMessageTime, messageCount, user, guildId
         xp *= recoveryFactor;
     }
     
-    // Apply server tag multiplier
-    if (user && guildId) {
-        const tagMultiplier = getServerTagMultiplier(user, guildId);
-        xp *= tagMultiplier;
-    }
+    // Note: Server tag multiplier will be applied asynchronously by caller
+    // to avoid making this function async (for backwards compatibility)
     
     // Ensure minimum XP is 0.0001
     return Math.max(0.0001, xp);
@@ -319,16 +375,13 @@ function calculateVoiceXPGain(lastVoiceTime, voiceMinuteCount, user, guildId) {
     if (fiveMinuteWindows > 0) {
         // Apply 50% reduction for each 5-minute window
         // Window 1: 50%, Window 2: 25%, Window 3: 12.5%, etc.
-        // But never below 0.1% (99.9% reduction max)
-        const reductionFactor = Math.max(0.001, Math.pow(0.5, fiveMinuteWindows));
+        // But never below 0.01% (99.99% reduction max)
+        const reductionFactor = Math.max(0.0001, Math.pow(0.5, fiveMinuteWindows));
         xp *= reductionFactor;
     }
     
-    // Apply server tag multiplier
-    if (user && guildId) {
-        const tagMultiplier = getServerTagMultiplier(user, guildId);
-        xp *= tagMultiplier;
-    }
+    // Note: Server tag multiplier will be applied asynchronously by caller
+    // to avoid making this function async (for backwards compatibility)
     
     // Ensure minimum XP is 0.0001
     return Math.max(0.0001, xp);
@@ -340,7 +393,9 @@ async function recoverDataFromLevelboard(client) {
     const RECOVERY_MESSAGE_ID = recoveryConfig.messageId;
     const GUILD_ID = "1416823209113686089"; // Your server ID
     
-    console.log('🔄 Attempting data recovery from levelboard...');
+    logWithTimestamp(`🔄 Attempting to sync with remote levelboard...`);
+    logWithTimestamp(`📍 Channel ID: ${RECOVERY_CHANNEL_ID}`);
+    logWithTimestamp(`📍 Message ID: ${RECOVERY_MESSAGE_ID}`);
     
     try {
         // Get the channel and message
@@ -348,30 +403,42 @@ async function recoverDataFromLevelboard(client) {
         const message = await channel.messages.fetch(RECOVERY_MESSAGE_ID);
         
         if (!message || !message.content) {
-            console.log('❌ Could not find levelboard message for recovery');
+            logWithTimestamp('❌ Could not find levelboard message for recovery');
             return false;
         }
         
-        console.log('📋 Found levelboard message, parsing data...');
+        logWithTimestamp('📋 Found remote levelboard, parsing user data...');
         
-        // Parse the levelboard content
+        // Parse the levelboard content - handle both old and new formats
         const content = message.content;
+        logWithTimestamp(`📏 Message content length: ${content.length} characters`);
         const lines = content.split('\n');
+        logWithTimestamp(`📝 Found ${lines.length} lines to parse`);
         
         const recoveredUsers = {};
         let recoveredCount = 0;
         
-        for (const line of lines) {
-            // Match format: "level | xp XP | username"
-            const match = line.match(/^\s*(\d+)\s*\|\s*([0-9,]+)\s*XP\s*\|\s*(.+)$/);
+        // Pre-fetch guild and members to avoid repeated fetches
+        logWithTimestamp('👥 Fetching guild members...');
+        const guild = await client.guilds.fetch(GUILD_ID);
+        const members = await guild.members.fetch();
+        logWithTimestamp(`👥 Loaded ${members.size} guild members`);
+        
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            logWithTimestamp(`🔍 Processing line ${i + 1}/${lines.length}: ${line.substring(0, 50)}...`);
+            
+            // Match format: "level | xp.xx XP | username" (with decimals)
+            // Also support old format: "level | xp XP | username" (without decimals)
+            const match = line.match(/^\s*(\d+)\s*\|\s*([0-9,]+(?:\.\d{2})?)\s*XP\s*\|\s*(.+)$/);
             if (match) {
                 const level = parseInt(match[1]);
-                const xp = parseInt(match[2].replace(/,/g, '')); // Remove commas
+                const xp = parseFloat(match[2].replace(/,/g, '')); // Handle decimals and remove commas
                 const username = match[3].trim();
                 
+                logWithTimestamp(`🔍 Parsed: Level ${level}, XP ${xp}, Username: ${username}`);
+                
                 // Try to find the user ID by username
-                const guild = await client.guilds.fetch(GUILD_ID);
-                const members = await guild.members.fetch();
                 const member = members.find(m => m.user.username === username);
                 
                 if (member) {
@@ -383,33 +450,39 @@ async function recoverDataFromLevelboard(client) {
                         lastDailyBonus: null
                     };
                     recoveredCount++;
-                    console.log(`✅ Recovered: ${username} (Level ${level}, ${xp} XP)`);
+                    logWithTimestamp(`✅ Synced: ${username} (Level ${level}, ${xp} XP)`);
                 } else {
-                    console.log(`⚠️  Could not find user: ${username}`);
+                    logWithTimestamp(`⚠️  User not found in server: ${username}`);
                 }
+            } else {
+                logWithTimestamp(`❌ Line didn't match pattern: ${line}`);
             }
         }
         
         if (recoveredCount > 0) {
+            // Preserve existing lastMessages and lastVoiceActivity data if it exists
+            const existingData = getServerLevels(GUILD_ID);
+            
             // Create the server data structure
             const serverData = {
                 users: recoveredUsers,
-                lastMessages: {},
+                lastMessages: existingData.lastMessages || {},
+                lastVoiceActivity: existingData.lastVoiceActivity || {},
                 levelboardChannelId: RECOVERY_CHANNEL_ID,
                 levelboardMessageId: RECOVERY_MESSAGE_ID
             };
             
-            // Save the recovered data
+            // Save the synced data
             saveServerLevels(GUILD_ID, serverData);
-            console.log(`🎉 Successfully recovered ${recoveredCount} users' data!`);
+            logWithTimestamp(`🎉 Successfully synced ${recoveredCount} users from remote levelboard!`);
             return true;
         } else {
-            console.log('❌ No user data could be recovered');
+            logWithTimestamp('❌ No user data could be parsed from remote levelboard');
             return false;
         }
         
     } catch (error) {
-        console.error('❌ Error during data recovery:', error);
+        errorWithTimestamp('[\x1b[31mERROR\x1b[0m] Remote data sync failed: ' + error.message);
         return false;
     }
 }
@@ -417,21 +490,37 @@ async function recoverDataFromLevelboard(client) {
 async function checkAndRecoverData(client) {
     const GUILD_ID = "1416823209113686089";
     
-    // Check if we have existing data
-    const existingData = getServerLevels(GUILD_ID);
-    const hasUsers = existingData.users && Object.keys(existingData.users).length > 0;
+    logWithTimestamp('🔄 Starting data recovery from remote levelboard...');
     
-    if (!hasUsers) {
-        console.log('🔍 No user data found, attempting recovery from levelboard...');
-        const recovered = await recoverDataFromLevelboard(client);
+    // Always attempt to recover the latest data from remote levelboard with timeout
+    let recovered = false;
+    try {
+        // Add 30-second timeout to prevent hanging
+        const recoveryPromise = recoverDataFromLevelboard(client);
+        const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Recovery timeout after 30 seconds')), 30000)
+        );
         
-        if (recovered) {
-            console.log('✅ Data recovery completed successfully!');
-        } else {
-            console.log('⚠️  Data recovery failed, starting with fresh data');
-        }
+        recovered = await Promise.race([recoveryPromise, timeoutPromise]);
+    } catch (error) {
+        logWithTimestamp('⏰ Recovery timed out or failed: ' + error.message);
+        recovered = false;
+    }
+    
+    if (recovered) {
+        logWithTimestamp('✅ Successfully synced with remote levelboard data!');
     } else {
-        console.log(`📊 Found existing data for ${Object.keys(existingData.users).length} users`);
+        logWithTimestamp('⚠️  Remote sync failed, checking for existing local data...');
+        
+        // If remote recovery failed, check if we have local data as fallback
+        const existingData = getServerLevels(GUILD_ID);
+        const hasUsers = existingData.users && Object.keys(existingData.users).length > 0;
+        
+        if (hasUsers) {
+            logWithTimestamp(`📊 Using existing local data for ${Object.keys(existingData.users).length} users`);
+        } else {
+            logWithTimestamp('📝 No local data found, starting with fresh data');
+        }
     }
 }
 
@@ -443,14 +532,14 @@ function getCurrentGermanDate() {
         // Return date string in YYYY-MM-DD format
         return germanTime.toISOString().split('T')[0];
     } catch (error) {
-        console.error('Error getting German date:', error);
+        errorWithTimestamp('Error getting German date: ' + error);
         // Fallback to UTC date if timezone conversion fails
         const now = new Date();
         return now.toISOString().split('T')[0];
     }
 }
 
-function addXP(guildId, userId, username, wordCount, user) {
+async function addXP(guildId, userId, username, wordCount, user) {
     const serverData = getServerLevels(guildId);
     const now = Date.now();
     
@@ -474,8 +563,14 @@ function addXP(guildId, userId, username, wordCount, user) {
     if (!serverData.lastMessages[userId]) {
         serverData.lastMessages[userId] = {
             timestamp: 0,
-            messageCount: 0
+            messageCount: 0,
+            lastLoggedPercentage: null // Track last logged chat penalty percentage
         };
+    }
+    
+    // Ensure lastLoggedPercentage exists for existing users (migration)
+    if (!serverData.lastMessages[userId].hasOwnProperty('lastLoggedPercentage')) {
+        serverData.lastMessages[userId].lastLoggedPercentage = null;
     }
     
     const userData = serverData.users[userId];
@@ -501,6 +596,30 @@ function addXP(guildId, userId, username, wordCount, user) {
     // Calculate XP gain (pass Discord user object and guildId for server tag detection)
     let xpGain = calculateXPGain(wordCount, lastMessage.timestamp, messageCount, user, guildId);
     
+    // Apply server tag multiplier
+    const tagMultiplier = await getServerTagMultiplier(user, guildId);
+    const baseXPWithTag = xpGain * tagMultiplier;
+    
+    // Check if chat penalty percentage changed and log only if it did
+    // Calculate percentage based on base XP per word (0.1 XP per word = 100%)
+    const baseXPPerWord = 0.1 * tagMultiplier; // Base with server tag multiplier
+    const currentPercentage = (baseXPWithTag / wordCount / baseXPPerWord) * 100;
+    
+    if (lastMessage.lastLoggedPercentage !== null && 
+        Math.abs(currentPercentage - lastMessage.lastLoggedPercentage) >= 0.01) {
+        
+        const formattedPercentage = currentPercentage.toLocaleString('de-DE', { 
+            minimumFractionDigits: 2, 
+            maximumFractionDigits: 2 
+        });
+        logWithTimestamp(`[DEBUG] Chat penalty for ${username}: ${formattedPercentage}%`);
+    }
+    
+    // Always update the tracked percentage
+    lastMessage.lastLoggedPercentage = currentPercentage;
+    
+    xpGain = baseXPWithTag;
+    
     // Check for daily bonus (10 XP for first message of the day)
     const currentDate = getCurrentGermanDate();
     if (userData.lastDailyBonus !== currentDate) {
@@ -524,7 +643,7 @@ function addXP(guildId, userId, username, wordCount, user) {
     try {
         saveServerLevels(guildId, serverData);
     } catch (saveError) {
-        console.error(`Failed to save XP data for user ${username} (${userId}):`, saveError);
+        errorWithTimestamp(`Failed to save XP data for user ${username} (${userId}): ` + saveError);
         // Don't throw here - we still want to return the XP info even if save failed
         // The user did gain XP in memory, just wasn't persisted
     }
@@ -540,7 +659,7 @@ function addXP(guildId, userId, username, wordCount, user) {
     };
 }
 
-function addVoiceXP(guildId, userId, username, user) {
+async function addVoiceXP(guildId, userId, username, user) {
     const serverData = getServerLevels(guildId);
     const now = Date.now();
     
@@ -567,8 +686,14 @@ function addVoiceXP(guildId, userId, username, user) {
     if (!serverData.lastVoiceActivity[userId]) {
         serverData.lastVoiceActivity[userId] = {
             timestamp: 0,
-            voiceMinuteCount: 0
+            voiceMinuteCount: 0,
+            lastLoggedPercentage: null // Track last logged penalty percentage
         };
+    }
+    
+    // Ensure lastLoggedPercentage exists for existing users (migration)
+    if (!serverData.lastVoiceActivity[userId].hasOwnProperty('lastLoggedPercentage')) {
+        serverData.lastVoiceActivity[userId].lastLoggedPercentage = null;
     }
     
     const userData = serverData.users[userId];
@@ -589,7 +714,28 @@ function addVoiceXP(guildId, userId, username, user) {
     voiceMinuteCount = Math.min(voiceMinuteCount, 50);
     
     // Calculate XP gain (pass Discord user object and guildId for server tag detection)
-    const xpGain = calculateVoiceXPGain(lastVoice.timestamp, voiceMinuteCount, user, guildId);
+    let xpGain = calculateVoiceXPGain(lastVoice.timestamp, voiceMinuteCount, user, guildId);
+    
+    // Apply server tag multiplier
+    const tagMultiplier = await getServerTagMultiplier(user, guildId);
+    const finalXPRate = xpGain * tagMultiplier;
+    
+    // Check if penalty percentage changed and log only if it did (show base rate without server tag effect)
+    const baseCurrentPercentage = xpGain * 100; // Base rate without server tag
+    if (lastVoice.lastLoggedPercentage !== null && 
+        Math.abs(baseCurrentPercentage - lastVoice.lastLoggedPercentage) >= 0.01) {
+        
+        const formattedPercentage = baseCurrentPercentage.toLocaleString('de-DE', { 
+            minimumFractionDigits: 2, 
+            maximumFractionDigits: 2 
+        });
+        logWithTimestamp(`[DEBUG] Voice penalty for ${username}: ${formattedPercentage}%`);
+    }
+    
+    // Always update the tracked percentage (use base rate for consistency)
+    lastVoice.lastLoggedPercentage = baseCurrentPercentage;
+    
+    xpGain = finalXPRate;
     
     // Update user data
     const oldLevel = userData.level;
@@ -605,7 +751,7 @@ function addVoiceXP(guildId, userId, username, user) {
     try {
         saveServerLevels(guildId, serverData);
     } catch (saveError) {
-        console.error(`Failed to save voice XP data for user ${username} (${userId}):`, saveError);
+        errorWithTimestamp(`Failed to save voice XP data for user ${username} (${userId}): ` + saveError);
         // Don't throw here - we still want to return the XP info even if save failed
     }
     
@@ -691,7 +837,7 @@ async function getScoreboardText(data, client) {
                     username = user.username;
                 } catch (error) {
                     // If user can't be fetched, use stored username as fallback
-                    console.log(`Could not fetch user ${entry.userId}, using stored username: ${username}`);
+                    logWithTimestamp(`Could not fetch user ${entry.userId}, using stored username: ${username}`);
                 }
                 
                 text += `${dayStr}D ${hourStr}H ${minuteStr}M | ${username}\n`;
@@ -711,6 +857,7 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildVoiceStates
+        // Removing privileged intents for now due to Discord portal issues
     ]
 });
 
@@ -793,15 +940,37 @@ const recoveryConfigCommand = new SlashCommandBuilder()
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 commands.push(recoveryConfigCommand);
 
+// Admin-only command to debug user properties for server tag detection
+const debugUserCommand = new SlashCommandBuilder()
+    .setName('debuguser')
+    .setDescription('Debug: Dump all user and member properties to a file for server tag detection')
+    .addUserOption(option =>
+        option.setName('user')
+            .setDescription('User to debug (leave empty for yourself)')
+            .setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
+commands.push(debugUserCommand);
+
+// Admin-only command to test server tag detection
+const testServerTagCommand = new SlashCommandBuilder()
+    .setName('testservertag')
+    .setDescription('Test: Check if a user has a server tag applied')
+    .addUserOption(option =>
+        option.setName('user')
+            .setDescription('User to check (leave empty for yourself)')
+            .setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
+commands.push(testServerTagCommand);
+
 // Register commands
 async function registerCommands() {
     try {
-        console.log('Started refreshing application (/) commands.');
+        logWithTimestamp('Started refreshing application (/) commands.');
         
         const rest = new REST({ version: '10' }).setToken(TOKEN);
         
         // Clear all existing global commands first
-        console.log('Clearing existing global commands...');
+        logWithTimestamp('Clearing existing global commands...');
         await rest.put(
             Routes.applicationCommands(CLIENT_ID),
             { body: [] }
@@ -809,7 +978,7 @@ async function registerCommands() {
         
         // Get all guilds and register commands for each one (instant update)
         const guilds = client.guilds.cache;
-        console.log(`Registering commands for ${guilds.size} guild(s)...`);
+        logWithTimestamp(`Registering commands for ${guilds.size} guild(s)...`);
         
         for (const [guildId, guild] of guilds) {
             try {
@@ -817,22 +986,22 @@ async function registerCommands() {
                     Routes.applicationGuildCommands(CLIENT_ID, guildId),
                     { body: commands }
                 );
-                console.log(`Commands registered for guild: ${guild.name}`);
+                logWithTimestamp(`Commands registered for guild: ${guild.name}`);
             } catch (error) {
-                console.error(`Failed to register commands for guild ${guild.name}:`, error);
+                errorWithTimestamp(`Failed to register commands for guild ${guild.name}: ` + error);
             }
         }
         
-        console.log('Successfully reloaded application (/) commands.');
+        logWithTimestamp('Successfully reloaded application (/) commands.');
         
     } catch (error) {
-        console.error('Error registering commands:', error);
+        errorWithTimestamp('Error registering commands: ' + error);
     }
 }
 
 // Bot ready event
 client.once('ready', async () => {
-    console.log(`Ready! Logged in as ${client.user.tag}`);
+    logWithTimestamp(`Ready! Logged in as ${client.user.tag}`);
     
     // Check and recover data if needed
     await checkAndRecoverData(client);
@@ -878,43 +1047,191 @@ async function assignLevelRoles(guildId, serverData) {
                             color: 'Random', // Random color for each level
                             reason: `Auto-created level role for level ${targetLevel} users`
                         });
-                        console.log(`Created "${targetRoleName}" role in guild ${guild.name}`);
+                        logWithTimestamp(`Created "${targetRoleName}" role in guild ${guild.name}`);
                     }
                     
-                    // Remove any old level roles from this user
+                    // Check if user already has the correct role and no old roles
+                    const hasCorrectRole = member.roles.cache.has(levelRole.id);
                     const oldLevelRoles = member.roles.cache.filter(role => 
                         role.name.startsWith('Level ') && role.name !== targetRoleName
                     );
+                    const hasOldRoles = oldLevelRoles.size > 0;
                     
-                    for (const oldRole of oldLevelRoles.values()) {
-                        if (member.roles.cache.has(oldRole.id)) {
-                            await member.roles.remove(oldRole);
-                            console.log(`Removed old role "${oldRole.name}" from ${userData.username}`);
+                    // Only perform role operations if there's a mismatch
+                    if (hasOldRoles || !hasCorrectRole) {
+                        // Remove any old level roles from this user
+                        let rolesChanged = false;
+                        for (const oldRole of oldLevelRoles.values()) {
+                            if (member.roles.cache.has(oldRole.id)) {
+                                await member.roles.remove(oldRole);
+                                logWithTimestamp(`Removed old role "${oldRole.name}" from ${userData.username}`);
+                                rolesChanged = true;
+                            }
                         }
-                    }
-                    
-                    // Add the correct level role if they don't already have it
-                    if (!member.roles.cache.has(levelRole.id)) {
-                        await member.roles.add(levelRole);
-                        console.log(`Assigned "${targetRoleName}" role to ${userData.username} (Level ${userData.level})`);
+                        
+                        // Add the correct level role if they don't already have it
+                        if (!member.roles.cache.has(levelRole.id)) {
+                            await member.roles.add(levelRole);
+                            logWithTimestamp(`Assigned "${targetRoleName}" role to ${userData.username} (Level ${userData.level})`);
+                            rolesChanged = true;
+                        }
                     }
                 } catch (memberError) {
                     // User might have left the server
-                    console.log(`Could not fetch member ${userId} for level role assignment`);
+                    logWithTimestamp(`Could not fetch member ${userId} for level role assignment`);
                 }
             }
         }
     } catch (error) {
-        console.log(`Error managing level roles for guild ${guildId}:`, error.message);
+        logWithTimestamp(`Error managing level roles for guild ${guildId}: ` + error.message);
     }
 }
 
-// Function to update all levelboards every 5 minutes
+// Function to update voice and chat recovery and log penalty changes
+async function updatePenaltyRecovery() {
+    try {
+        const allLevelData = loadLevels();
+        let dataChanged = false;
+        
+        for (const [guildId, serverData] of Object.entries(allLevelData)) {
+            // Handle voice recovery
+            if (serverData.lastVoiceActivity) {
+                for (const [userId, lastVoice] of Object.entries(serverData.lastVoiceActivity)) {
+                    if (!lastVoice.timestamp) continue;
+                    
+                    const now = Date.now();
+                    const timeSinceLastVoice = now - lastVoice.timestamp;
+                    const oneHour = 60 * 60 * 1000;
+                    
+                    // Calculate recovery
+                    const hourPeriods = Math.floor(timeSinceLastVoice / oneHour);
+                    const recoveryAmount = hourPeriods * 5;
+                    const newVoiceMinuteCount = Math.max(0, lastVoice.voiceMinuteCount - recoveryAmount);
+                    
+                    // Update the voice minute count if it changed due to recovery
+                    if (newVoiceMinuteCount !== lastVoice.voiceMinuteCount) {
+                        lastVoice.voiceMinuteCount = newVoiceMinuteCount;
+                        lastVoice.timestamp = now - (timeSinceLastVoice % oneHour); // Adjust timestamp for recovery
+                        dataChanged = true;
+                        
+                        // Calculate the new penalty percentage and log if changed
+                        const userData = serverData.users && serverData.users[userId];
+                        if (userData) {
+                            // Get user object for server tag calculation (we need guild context)
+                            const guild = client.guilds.cache.get(guildId);
+                            if (guild) {
+                                try {
+                                    const member = await guild.members.fetch(userId);
+                                    const user = member.user;
+                                    
+                                    // Calculate with server tag multiplier
+                                    const baseXPGain = calculateVoiceXPGain(lastVoice.timestamp, newVoiceMinuteCount, null, null);
+                                    const tagMultiplier = await getServerTagMultiplier(user, guildId);
+                                    const finalXPRate = baseXPGain * tagMultiplier;
+                                    const baseCurrentPercentage = baseXPGain * 100; // Base rate without server tag
+                                    
+                                    // Only log if percentage changed (use base rate for consistency)
+                                    if (lastVoice.lastLoggedPercentage === null || 
+                                        Math.abs(baseCurrentPercentage - lastVoice.lastLoggedPercentage) >= 0.01) {
+                                        
+                                        const formattedPercentage = baseCurrentPercentage.toLocaleString('de-DE', { 
+                                            minimumFractionDigits: 2, 
+                                            maximumFractionDigits: 2 
+                                        });
+                                        
+                                        logWithTimestamp(`[DEBUG] Voice penalty for ${userData.username}: ${formattedPercentage}% (recovery)`);
+                                        lastVoice.lastLoggedPercentage = baseCurrentPercentage;
+                                        dataChanged = true; // Mark data as changed to save the logged percentage
+                                    }
+                                } catch (memberError) {
+                                    // User not in guild anymore, skip logging
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Handle chat recovery
+            if (serverData.lastMessages) {
+                for (const [userId, lastMessage] of Object.entries(serverData.lastMessages)) {
+                    if (!lastMessage.timestamp) continue;
+                    
+                    const now = Date.now();
+                    const timeSinceLastMessage = now - lastMessage.timestamp;
+                    const oneHour = 60 * 60 * 1000;
+                    
+                    // Calculate recovery
+                    const hourPeriods = Math.floor(timeSinceLastMessage / oneHour);
+                    const newMessageCount = Math.max(0, lastMessage.messageCount - hourPeriods);
+                    
+                    // Update the message count if it changed due to recovery
+                    if (newMessageCount !== lastMessage.messageCount) {
+                        lastMessage.messageCount = newMessageCount;
+                        dataChanged = true;
+                        
+                        // Calculate the new penalty percentage and log if changed
+                        const userData = serverData.users && serverData.users[userId];
+                        if (userData) {
+                            // Get user object for server tag calculation
+                            const guild = client.guilds.cache.get(guildId);
+                            if (guild) {
+                                try {
+                                    const member = await guild.members.fetch(userId);
+                                    const user = member.user;
+                                    
+                                    // Calculate chat penalty with server tag multiplier
+                                    const baseXPGain = calculateXPGain(1, lastMessage.timestamp, newMessageCount, null, null); // 1 word for calculation
+                                    const tagMultiplier = await getServerTagMultiplier(user, guildId);
+                                    const finalXPRate = baseXPGain * tagMultiplier;
+                                    const baseXPPerWord = 0.1 * tagMultiplier; // Base XP per word with server tag
+                                    const currentPercentage = (finalXPRate / baseXPPerWord) * 100;
+                                    
+                                    // Only log if percentage changed
+                                    if (lastMessage.lastLoggedPercentage === null || 
+                                        Math.abs(currentPercentage - lastMessage.lastLoggedPercentage) >= 0.01) {
+                                        
+                                        const formattedPercentage = currentPercentage.toLocaleString('de-DE', { 
+                                            minimumFractionDigits: 2, 
+                                            maximumFractionDigits: 2 
+                                        });
+                                        
+                                        logWithTimestamp(`[DEBUG] Chat penalty for ${userData.username}: ${formattedPercentage}% (recovery)`);
+                                        lastMessage.lastLoggedPercentage = currentPercentage;
+                                        dataChanged = true; // Mark data as changed to save the logged percentage
+                                    }
+                                } catch (memberError) {
+                                    // User not in guild anymore, skip logging
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Save only if data actually changed
+        if (dataChanged) {
+            saveLevels(allLevelData);
+        }
+    } catch (error) {
+        errorWithTimestamp('Error updating penalty recovery: ' + error);
+    }
+}
+
+// Function to update all levelboards every hour
 function startLevelboardUpdates() {
-    const fiveMinutes = 5 * 60 * 1000; // 5 minutes in milliseconds
+    const oneHour = 60 * 60 * 1000; // 60 minutes in milliseconds
+    
+    logWithTimestamp('[DEBUG] Setting up 60-minute levelboard update interval...');
     
     setInterval(async () => {
-        console.log('Running 5-minute levelboard updates...');
+        const germanTime = new Date().toLocaleTimeString('de-DE', { 
+            timeZone: 'Europe/Berlin', 
+            hour: '2-digit', 
+            minute: '2-digit' 
+        });
+        logWithTimestamp(`[DEBUG] Updating Levelboard (${germanTime})`);
         
         try {
             const allLevelData = loadLevels();
@@ -925,13 +1242,11 @@ function startLevelboardUpdates() {
                 // Skip if bot is not in this guild
                 const guild = client.guilds.cache.get(guildId);
                 if (!guild) {
-                    console.log(`[DEBUG] Skipping guild ${guildId} - bot is not a member`);
                     continue;
                 }
                 
                 // Skip if manual operation is in progress
                 if (levelboardOperations.has(operationKey)) {
-                    console.log(`[DEBUG] Skipping automatic update for guild ${guildId} - manual operation in progress`);
                     continue;
                 }
                 
@@ -940,9 +1255,9 @@ function startLevelboardUpdates() {
                         const channel = await client.channels.fetch(serverData.levelboardChannelId);
                         const levelboardMsg = await channel.messages.fetch(serverData.levelboardMessageId);
                         await levelboardMsg.edit(await getLevelboardText(serverData, client));
-                        console.log(`Updated levelboard for guild ${guildId}`);
+                        // Levelboard updated silently
                     } catch (error) {
-                        console.log(`Could not update levelboard for guild ${guildId}:`, error.message);
+                        logWithTimestamp(`Could not update levelboard for guild ${guildId}: ` + error.message);
                         // Remove invalid references
                         serverData.levelboardChannelId = null;
                         serverData.levelboardMessageId = null;
@@ -954,29 +1269,33 @@ function startLevelboardUpdates() {
                 try {
                     await assignLevelRoles(guildId, serverData);
                 } catch (error) {
-                    console.log(`Could not assign level roles for guild ${guildId}:`, error.message);
+                    logWithTimestamp(`Could not assign level roles for guild ${guildId}: ` + error.message);
                 }
             }
+            
+            // Update voice and chat recovery for all users
+            await updatePenaltyRecovery();
+            
         } catch (error) {
-            console.error('Error during 5-minute levelboard update:', error);
+            errorWithTimestamp('Error during 60-minute levelboard update: ' + error);
         }
-    }, fiveMinutes);
+    }, oneHour);
     
-    console.log('Hourly levelboard updates started!');
+    logWithTimestamp('60-minute levelboard updates started!');
 }
 
 // Function to scan all servers for existing scoreboard messages
 async function scanExistingScoreboards() {
-    console.log('Scanning for existing scoreboards...');
+    logWithTimestamp('Scanning for existing scoreboards...');
     
     for (const [guildId, guild] of client.guilds.cache) {
         try {
-            console.log(`Scanning guild: ${guild.name}`);
+            logWithTimestamp(`Scanning guild: ${guild.name}`);
             const serverData = getServerScoreboard(guildId);
             
             // If we already have data for this server, skip
             if (serverData.messageId && serverData.channelId) {
-                console.log(`  - Already have scoreboard data for ${guild.name}`);
+                logWithTimestamp(`  - Already have scoreboard data for ${guild.name}`);
                 continue;
             }
             
@@ -999,7 +1318,7 @@ async function scanExistingScoreboards() {
                             message.content.includes('MISERY:') && 
                             message.content.includes('INTERLOPER:')) {
                             
-                            console.log(`  - Found existing scoreboard in #${channel.name}`);
+                            logWithTimestamp(`  - Found existing scoreboard in #${channel.name}`);
                             
                             // Save this as the server's scoreboard
                             serverData.messageId = messageId;
@@ -1020,15 +1339,15 @@ async function scanExistingScoreboards() {
             }
             
             if (!foundScoreboard) {
-                console.log(`  - No existing scoreboard found for ${guild.name}`);
+                logWithTimestamp(`  - No existing scoreboard found for ${guild.name}`);
             }
             
         } catch (error) {
-            console.error(`Error scanning guild ${guild.name}:`, error.message);
+            errorWithTimestamp(`Error scanning guild ${guild.name}: ` + error.message);
         }
     }
     
-    console.log('Finished scanning for existing scoreboards.');
+    logWithTimestamp('Finished scanning for existing scoreboards.');
 }
 
 // Handle messages for XP system
@@ -1044,24 +1363,28 @@ client.on('messageCreate', async message => {
         if (wordCount === 0) return; // No words, no XP
         
         // Add XP to user
-        const result = addXP(message.guild.id, message.author.id, message.author.username, wordCount, message.author);
+        const result = await addXP(message.guild.id, message.author.id, message.author.username, wordCount, message.author);
+        
+        // Log chat XP award (similar to voice XP logging)
+        logWithTimestamp(`[INFO] Chat XP awarded to ${message.author.username}: +${result.xpGain} XP (${wordCount} words) (Total: ${result.totalXP}, Level: ${result.level})`);
         
         // Notify on level up (optional - you can remove this if you don't want notifications)
         if (result.leveledUp) {
+            logWithTimestamp(`[INFO] 🎉 ${message.author.username} leveled up from level ${result.oldLevel} to level ${result.level}!`);
             try {
                 await message.react('🎉');
             } catch (error) {
-                console.log('Could not send level up notification:', error.message);
+                logWithTimestamp('Could not send level up notification: ' + error.message);
             }
         }
     } catch (error) {
-        console.error('Error processing message for XP system:', error);
-        console.error('Message details:', {
+        errorWithTimestamp('Error processing message for XP system: ' + error);
+        errorWithTimestamp('Message details: ' + JSON.stringify({
             guildId: message.guild?.id,
             userId: message.author?.id,
             username: message.author?.username,
             content: message.content?.substring(0, 100) // First 100 chars for debugging
-        });
+        }));
     }
 });
 
@@ -1081,27 +1404,27 @@ client.on('voiceStateUpdate', (oldState, newState) => {
             username: username,
             user: newState.member.user, // Store the Discord user object for server tag detection
             joinTime: Date.now(),
-            interval: setInterval(() => {
+            interval: setInterval(async () => {
                 // Award XP every minute
                 try {
                     const trackingData = voiceTracking.get(userId);
                     if (trackingData) {
-                        const result = addVoiceXP(guildId, userId, username, trackingData.user);
-                        console.log(`Voice XP awarded to ${username}: +${result.xpGain} XP (Total: ${result.totalXP}, Level: ${result.level})`);
+                        const result = await addVoiceXP(guildId, userId, username, trackingData.user);
+                        logWithTimestamp(`[INFO] Voice XP awarded to ${username}: +${result.xpGain} XP (Total: ${result.totalXP}, Level: ${result.level})`);
                         
                         // Check for level up
                         if (result.leveledUp) {
-                            console.log(`🎉 ${username} leveled up to level ${result.level}!`);
+                            logWithTimestamp(`[INFO] 🎉 ${username} leveled up to level ${result.level}!`);
                             // Optionally send level up notification to a channel here
                         }
                     }
                 } catch (error) {
-                    console.log('Error awarding voice XP:', error.message);
+                    logWithTimestamp(`[\x1b[31mERROR\x1b[0m] Error awarding voice XP: ` + error.message);
                 }
             }, 60000) // 60 seconds = 1 minute
         });
-        
-        console.log(`${username} joined voice channel in ${newState.guild.name}`);
+
+        logWithTimestamp(`[INFO] ${username} joined voice channel in ${newState.guild.name}`);
     }
     
     // User left a voice channel
@@ -1114,14 +1437,14 @@ client.on('voiceStateUpdate', (oldState, newState) => {
             
             const timeInVoice = Date.now() - tracking.joinTime;
             const minutesInVoice = Math.floor(timeInVoice / 60000);
-            console.log(`${username} left voice channel after ${minutesInVoice} minutes`);
+            logWithTimestamp(`[INFO] ${username} left voice channel after ${minutesInVoice} minutes`);
         }
     }
     
     // User switched voice channels (still in voice, just different channel)
     if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
         // No need to restart tracking, they're still in voice
-        console.log(`${username} switched voice channels`);
+        logWithTimestamp(`[INFO] ${username} switched voice channels`);
     }
 });
 
@@ -1132,13 +1455,13 @@ client.on('interactionCreate', async interaction => {
     // Prevent duplicate processing using interaction ID
     const interactionKey = `${interaction.id}_${interaction.commandName}`;
     if (processedInteractions.has(interactionKey)) {
-        console.log(`[DEBUG] Interaction ${interaction.id} already processed, skipping...`);
+        logWithTimestamp(`[DEBUG] Interaction ${interaction.id} already processed, skipping...`);
         return;
     }
     
     // Prevent duplicate processing using replied/deferred status
     if (interaction.replied || interaction.deferred) {
-        console.log('[DEBUG] Interaction already processed (replied/deferred), skipping...');
+        logWithTimestamp('[DEBUG] Interaction already processed (replied/deferred), skipping...');
         return;
     }
     
@@ -1174,7 +1497,7 @@ client.on('interactionCreate', async interaction => {
                     const scoreboardMsg = await channel.messages.fetch(scoreboardData.messageId);
                     await scoreboardMsg.edit(await getScoreboardText(scoreboardData, client));
                 } catch (e) {
-                    console.log('Could not update scoreboard message:', e.message);
+                    logWithTimestamp(`[\x1b[31mERROR\x1b[0m] Could not update scoreboard message: ` + e.message);
                 }
             }
             
@@ -1184,7 +1507,7 @@ client.on('interactionCreate', async interaction => {
             });
             
         } catch (error) {
-            console.error('Score submission error:', error);
+            errorWithTimestamp(`[\x1b[31mERROR\x1b[0m] Score submission error: ` + error);
             await interaction.reply({ 
                 content: '❌ Error submitting score. Please try again.', 
                 ephemeral: true 
@@ -1213,7 +1536,7 @@ client.on('interactionCreate', async interaction => {
                     }
                 } catch (e) {
                     // Message was deleted, we can create a new one
-                    console.log('Existing scoreboard message was deleted, creating new one...');
+                    logWithTimestamp('[DEBUG] Existing scoreboard message was deleted, creating new one...');
                 }
             }
             
@@ -1233,7 +1556,7 @@ client.on('interactionCreate', async interaction => {
             });
             
         } catch (error) {
-            console.error('Scoreboard creation error:', error);
+            errorWithTimestamp('Scoreboard creation error: ' + error);
             await interaction.reply({ 
                 content: '❌ Error creating scoreboard. Please try again.', 
                 ephemeral: true 
@@ -1310,17 +1633,9 @@ client.on('interactionCreate', async interaction => {
                 // (but without the +1 since we're not adding a new minute, just checking current state)
                 const currentVoiceMinuteCount = Math.max(0, lastVoice.voiceMinuteCount - recoveryAmount);
                 
-                // DEBUG: Add some logging to see what's happening
-                console.log(`[DEBUG] Voice penalty for ${targetUser.username}:`);
-                console.log(`  Stored voice minutes: ${lastVoice.voiceMinuteCount}`);
-                console.log(`  Hours since last voice: ${hourPeriods}`);
-                console.log(`  Recovery amount: ${recoveryAmount}`);
-                console.log(`  Current voice minutes: ${currentVoiceMinuteCount}`);
-                console.log(`  Five-minute windows: ${Math.floor(currentVoiceMinuteCount / 5)}`);
-                
                 // Get the actual XP gain for voice to determine the current modifier
                 const actualVoiceXPGain = calculateVoiceXPGain(lastVoice.timestamp, currentVoiceMinuteCount, null, null);
-                console.log(`  Calculated XP gain: ${actualVoiceXPGain}`);
+                
                 voiceModifier = actualVoiceXPGain; // This already includes all penalties but not server tag
             }
             
@@ -1335,7 +1650,7 @@ client.on('interactionCreate', async interaction => {
             
             // Calculate actual multipliers (displayed as additive bonuses)
             const baseMultiplier = 1.0;
-            const serverTagRawMultiplier = getServerTagMultiplier(targetUser, guildId);
+            const serverTagRawMultiplier = await getServerTagMultiplier(targetUser, guildId);
             const serverTagBonusMultiplier = serverTagRawMultiplier - 1.0; // Convert 2x to +1x bonus
             const totalMultiplier = baseMultiplier + serverTagBonusMultiplier;
             
@@ -1399,7 +1714,7 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply({ embeds: [embed] });
             
         } catch (error) {
-            console.error('Level command error:', error);
+            errorWithTimestamp('Level command error: ' + error);
             await interaction.reply({ 
                 content: '❌ Error getting level information. Please try again.', 
                 ephemeral: true 
@@ -1414,7 +1729,7 @@ client.on('interactionCreate', async interaction => {
         
         // Check if we've already processed this exact interaction
         if (processedInteractions.has(interactionId)) {
-            console.log(`[DEBUG] Already processed interaction ${interactionId}, ignoring duplicate...`);
+            logWithTimestamp(`[DEBUG] Already processed interaction ${interactionId}, ignoring duplicate...`);
             return;
         }
         
@@ -1430,7 +1745,7 @@ client.on('interactionCreate', async interaction => {
         
         // Prevent duplicate operations
         if (levelboardOperations.has(operationKey)) {
-            console.log(`[DEBUG] Levelboard operation already in progress for guild ${guildId}, skipping...`);
+            logWithTimestamp(`[DEBUG] Levelboard operation already in progress for guild ${guildId}, skipping...`);
             await interaction.reply({ 
                 content: '⏳ Levelboard operation already in progress...', 
                 ephemeral: true 
@@ -1463,17 +1778,17 @@ client.on('interactionCreate', async interaction => {
             
             // Update the reply to success
             await interaction.editReply({ 
-                content: '✅ Level scoreboard created in this channel! It will update automatically every 5 minutes.'
+                content: '✅ Level scoreboard created in this channel! It will update automatically every minute.'
             });
             
         } catch (error) {
-            console.error('Levelboard creation error:', error);
+            errorWithTimestamp('Levelboard creation error: ' + error);
             try {
                 await interaction.editReply({ 
                     content: '❌ Error creating level scoreboard. Please try again.'
                 });
             } catch (replyError) {
-                console.error('Failed to edit reply:', replyError);
+                errorWithTimestamp('Failed to edit reply: ' + replyError);
             }
         } finally {
             // Always remove the operation lock
@@ -1542,20 +1857,230 @@ client.on('interactionCreate', async interaction => {
         }
         return;
     }
+    
+    else if (commandName === 'debuguser') {
+        // Check if user is admin
+        if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            await interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
+            return;
+        }
+        
+        const targetUser = interaction.options.getUser('user') || interaction.user;
+        const guildId = interaction.guild.id;
+        
+        try {
+            // Fetch guild and member info
+            const guild = interaction.guild;
+            const member = await guild.members.fetch(targetUser.id);
+            
+            // Function to safely extract object properties
+            function extractProperties(obj, name) {
+                const result = {
+                    [`${name}_type`]: typeof obj,
+                    [`${name}_constructor`]: obj?.constructor?.name || 'unknown',
+                    [`${name}_properties`]: [],
+                    [`${name}_values`]: {}
+                };
+                
+                if (obj && typeof obj === 'object') {
+                    try {
+                        // Get all property names including non-enumerable ones
+                        const allProps = Object.getOwnPropertyNames(obj);
+                        result[`${name}_properties`] = allProps;
+                        
+                        // Get values for ALL properties, not just enumerable ones
+                        for (const prop of allProps) {
+                            try {
+                                const value = obj[prop];
+                                if (typeof value !== 'function') {
+                                    if (typeof value === 'object' && value !== null) {
+                                        // For objects, extract more detailed information
+                                        if (Array.isArray(value)) {
+                                            result[`${name}_values`][prop] = {
+                                                type: 'array',
+                                                length: value.length,
+                                                items: value.slice(0, 10) // First 10 items to avoid huge arrays
+                                            };
+                                        } else if (value instanceof Map) {
+                                            result[`${name}_values`][prop] = {
+                                                type: 'Map',
+                                                size: value.size,
+                                                keys: Array.from(value.keys()).slice(0, 10)
+                                            };
+                                        } else if (value instanceof Set) {
+                                            result[`${name}_values`][prop] = {
+                                                type: 'Set',
+                                                size: value.size,
+                                                values: Array.from(value).slice(0, 10)
+                                            };
+                                        } else {
+                                            // For other objects, get nested properties recursively (but only 1 level deep)
+                                            const nestedProps = Object.getOwnPropertyNames(value);
+                                            const nestedValues = {};
+                                            for (const nestedProp of nestedProps.slice(0, 20)) { // Limit to prevent too much data
+                                                try {
+                                                    const nestedValue = value[nestedProp];
+                                                    if (typeof nestedValue !== 'function' && typeof nestedValue !== 'object') {
+                                                        nestedValues[nestedProp] = nestedValue;
+                                                    } else if (typeof nestedValue === 'object' && nestedValue !== null) {
+                                                        nestedValues[nestedProp] = {
+                                                            type: typeof nestedValue,
+                                                            constructor: nestedValue.constructor?.name || 'unknown'
+                                                        };
+                                                    }
+                                                } catch (e) {
+                                                    nestedValues[nestedProp] = `[Error: ${e.message}]`;
+                                                }
+                                            }
+                                            result[`${name}_values`][prop] = {
+                                                type: typeof value,
+                                                constructor: value.constructor?.name || 'unknown',
+                                                properties: nestedProps,
+                                                values: nestedValues
+                                            };
+                                        }
+                                    } else {
+                                        // For primitive values, store directly
+                                        result[`${name}_values`][prop] = value;
+                                    }
+                                } else {
+                                    // For functions, just note it's a function
+                                    result[`${name}_values`][prop] = '[Function]';
+                                }
+                            } catch (e) {
+                                result[`${name}_values`][prop] = `[Error accessing property: ${e.message}]`;
+                            }
+                        }
+                    } catch (e) {
+                        result[`${name}_error`] = e.message;
+                    }
+                }
+                
+                return result;
+            }
+            
+            // Collect all data
+            const debugData = {
+                timestamp: new Date().toISOString(),
+                target_user_id: targetUser.id,
+                target_username: targetUser.username,
+                guild_id: guildId,
+                guild_name: guild.name,
+                
+                // User object analysis
+                ...extractProperties(targetUser, 'user'),
+                
+                // Member object analysis
+                ...extractProperties(member, 'member'),
+                
+                // Guild object analysis
+                ...extractProperties(guild, 'guild'),
+                
+                // Special focus on potential server identity properties
+                special_checks: {
+                    user_flags: targetUser.flags ? {
+                        bitfield: targetUser.flags.bitfield,
+                        array: targetUser.flags.toArray?.() || 'no toArray method',
+                        has_method: typeof targetUser.flags.has === 'function'
+                    } : null,
+                    
+                    member_flags: member.flags ? {
+                        bitfield: member.flags.bitfield,
+                        array: member.flags.toArray?.() || 'no toArray method', 
+                        has_method: typeof member.flags.has === 'function'
+                    } : null,
+                    
+                    guild_features: guild.features,
+                    
+                    member_avatar: member.avatar,
+                    user_avatar: targetUser.avatar,
+                    member_banner: member.banner,
+                    user_banner: targetUser.banner,
+                    
+                    member_premium_since: member.premiumSince,
+                    member_display_name: member.displayName,
+                    member_nickname: member.nickname,
+                    
+                    // Check for any identity-related properties
+                    potential_identity_props: {
+                        user_primary_guild: targetUser.primaryGuild,
+                        user_identity_enabled: targetUser.identityEnabled,
+                        user_identity_guild_id: targetUser.identityGuildId,
+                        member_guild_avatar: member.avatar,
+                        member_guild_identity: member.guildIdentity,
+                        member_server_identity: member.serverIdentity,
+                        member_identity: member.identity
+                    }
+                }
+            };
+            
+            // Save to file
+            const filename = `debug_user_${targetUser.id}_${Date.now()}.json`;
+            const filepath = path.join(__dirname, 'data', filename);
+            
+            fs.writeFileSync(filepath, JSON.stringify(debugData, null, 2), 'utf8');
+            
+            await interaction.reply({ 
+                content: `✅ Debug data saved to \`${filename}\`\n` +
+                        `Target: ${targetUser.username} (${targetUser.id})\n` +
+                        `Check the data folder for the complete property dump.`,
+                ephemeral: true 
+            });
+            
+        } catch (error) {
+            errorWithTimestamp('Debug user command error: ' + error);
+            await interaction.reply({ 
+                content: `❌ Error collecting debug data: ${error.message}`,
+                ephemeral: true 
+            });
+        }
+        return;
+    }
+    else if (commandName === 'testservertag') {
+        try {
+            const targetUser = interaction.options.getUser('user') || interaction.user;
+            const guildId = interaction.guild.id;
+            
+            await interaction.deferReply({ ephemeral: true });
+            
+            // Test server tag detection
+            const hasTag = await hasServerTag(targetUser, guildId);
+            const multiplier = await getServerTagMultiplier(targetUser, guildId);
+            
+            await interaction.editReply({
+                content: `🔍 **Server Tag Detection Test**\n` +
+                        `**User:** ${targetUser.username} (${targetUser.id})\n` +
+                        `**Has Server Tag:** ${hasTag ? '✅ Yes' : '❌ No'}\n` +
+                        `**XP Multiplier:** ${multiplier}x\n` +
+                        `**Guild:** ${interaction.guild.name} (${guildId})\n\n` +
+                        `${hasTag ? '🎉 This user should get 2x XP bonus!' : '📝 This user gets normal XP rates.'}`,
+                ephemeral: true
+            });
+            
+        } catch (error) {
+            errorWithTimestamp('Test server tag command error: ' + error);
+            await interaction.editReply({ 
+                content: `❌ Error testing server tag detection: ${error.message}\n\n` +
+                        `**Error Details:**\n\`\`\`${error.stack || error.toString()}\`\`\``,
+                ephemeral: true 
+            });
+        }
+        return;
+    }
 });
 
 // Error handling
 client.on('error', error => {
-    console.error('Discord client error:', error);
+    errorWithTimestamp('Discord client error: ' + error);
 });
 
 process.on('unhandledRejection', error => {
-    console.error('Unhandled promise rejection:', error);
+    errorWithTimestamp('Unhandled promise rejection: ' + error);
 });
 
 // Cleanup voice tracking on shutdown
 process.on('SIGINT', () => {
-    console.log('Bot shutting down, cleaning up voice tracking...');
+    logWithTimestamp('Bot shutting down, cleaning up voice tracking...');
     for (const tracking of voiceTracking.values()) {
         clearInterval(tracking.interval);
     }
@@ -1564,7 +2089,7 @@ process.on('SIGINT', () => {
 });
 
 process.on('SIGTERM', () => {
-    console.log('Bot shutting down, cleaning up voice tracking...');
+    logWithTimestamp('Bot shutting down, cleaning up voice tracking...');
     for (const tracking of voiceTracking.values()) {
         clearInterval(tracking.interval);
     }
@@ -1574,7 +2099,7 @@ process.on('SIGTERM', () => {
 
 // Login to Discord
 if (!TOKEN || !CLIENT_ID) {
-    console.error('Please make sure tokens.txt has your bot token on line 1 and client ID on line 2!');
+    errorWithTimestamp('Please make sure tokens.txt has your bot token on line 1 and client ID on line 2!');
     process.exit(1);
 }
 
